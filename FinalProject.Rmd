@@ -1,0 +1,626 @@
+---
+title: "Dust loading on Colorado Snowpack"
+author: "Billy Johnson"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Intro
+### Load in Packages
+```{r}
+library(tidyverse)
+library(kableExtra)
+library(ggthemes)
+library(readxl)
+library(readr)
+library(purrr)
+library(magrittr)
+library(lubridate)
+library(scales)
+library(viridis)
+library(pals)
+library(plotly)
+library(ggplot2)
+library(patchwork)
+library(broom)
+
+knitr::opts_chunk$set(echo = TRUE)
+theme_set(theme_few())
+```
+
+### Objectives and Research Question
+
+How does dust loading in the Colorado snow pack affect alpine areas energy budget?
+
+•	Examine how dust events influence outgoing short and long-wave radiation, as well as surface snow temperature.
+
+•	Evaluate melt rates when dust layers are exposed versus not exposed
+
+
+## Loading in the Data --------------------------
+```{r}
+# Load in Dust Mass Data
+SASP_Mass_Simple <- read_excel("Data/In/SASP_Mass_Simple.xlsx")
+
+#Load in the Energy Budget Data 24 hrs
+Energy_24hr <- read_csv("Data/In/SASP_24hr.csv")
+
+# Load in the energy budget data for 1 hr
+Energy_1hr <- read_csv("Data/In/SASP_1hr_2010-2023.csv")
+
+
+# Load in the 24 hr Stream gauge data
+stream_24hr <- read_csv("Data/In/SBSG_24hr.csv")
+
+# Load in the 1 hr stream gauge data
+stream_1hr <- read_csv("Data/In/SBSG_1hr (1).csv")
+
+# Load in SWE
+SWE <- read_csv("Data/In/SWE.txt",
+                col_names = c("Date", "SWE_in", "Precip_in", "Air_Temp_Max_F", "Air_Temp_Min_F", "Air_Temp_Avg_F", "Precip_Incriment_in"),
+                   skip = 64)
+```
+
+# Cleaning
+## Dust Data
+```{r}
+# Get sheet names
+dust_sheets <- excel_sheets("Data/In/SASP_Mass_Simple.xlsx") 
+
+
+# SASP_Mass_Loading_Data <- read_excel("Data/In/SASP+Mass+Loading+Data.xls")
+dust_data_years <- dust_sheets %>%
+  # Split the incoming strings on a space to grab years
+  str_split_fixed(., ' ', 3) %>%
+  # grab only the year column
+  .[,2] %>%
+  #convert to numeric
+  as.numeric(.) 
+
+
+# Combine the numeric year column and the sheet name column
+sheet_table <- tibble(year = dust_data_years,
+                      sheet = dust_sheets) %>%
+  filter(year != 2021)
+
+sheet_table
+
+# Getting all sheets into R         ? I am having issue becase I removed 2021 from the data and now the if else function is not working right, i belive that I just have a typing issue with the brackets
+
+# Creating a function to get a sheet into R.
+custom_reader <- function(sheet = sheet_table$sheet[1], year = sheet_table$year[1]){
+  read_excel('Data/In/SASP_Mass_Simple.xlsx',
+             # The first ^ rows just have text we want to skip those
+             sheet = sheet, skip = 6,
+             col_types = 'text') %>%
+    mutate(year = year)
+}
+
+# # Create an Empty list for the loop function
+# empty_list <- list()
+# 
+# # Loop function to get all sheets
+# for(i in 1:nrow(sheet_table)){
+#   # Creating values
+#   empty_list[[i]] <- custom_reader(sheet = sheet_table$sheet[i],
+#                                    year = sheet_table$year[i])
+#   print(i)
+# }
+# 
+# 
+# # Stack the list of sheets into one table
+# dust_analysis <- do.call('rbind',empty_list)
+# 
+
+dust_2 <- pmap_dfr(sheet_table, custom_reader)
+
+dust_mass <- dust_2 %>% 
+  filter(grepl("^\\d+\\.?\\d*$", Mass))
+
+dust_mass %<>% 
+  mutate(date = lubridate::mdy(DateClean))
+
+dust_mass %>% 
+  mutate(DateClean = as.Date(DateClean, format = "'%m/%d/%Y'"))
+
+unique(dust_2$Weigth)
+View(dust_2)
+str(dust_2)
+
+write_csv(dust_mass, "Data/Out/Dust_Clean.csv")
+Dust_clean <- read_csv("Data/Out/Dust_Clean.csv")
+```
+
+### Changing the column types for dust data
+```{r}
+dust_2 %<>% 
+  mutate(date = lubridate::mdy(DateClean))
+
+dust_2 %<>%
+  mutate(weight = ifelse(is.na(Weigth),NA, as.numeric(Weigth)))
+
+```
+
+## Stream Data 24 hr
+```{r}
+view(stream_24hr)
+
+
+stream_24hr_clean <- stream_24hr %>% 
+  filter(!(Year >= "2005" & Year <= "2010"))
+  
+stream_24hr_clean <- stream_24hr %>% 
+  filter(!(Year >= "2020" & Year <= "2023"))
+
+stream_24hr_clean <- stream_24hr_clean %>% 
+    mutate(Hour = sub("00$", "", Hour),
+         date = as.POSIXct(paste(Year, DOY, Hour), format = "%Y %j %H"),
+         month = format(date, "%m"),
+         day = format(date, "%d"),
+         year = format(date, "%Y"))
+
+  
+stream_max <- stream_24hr %>% 
+  group_by(Year) %>% 
+  summarise(max_q = max(Discharge_CFS, na.rm = TRUE),
+            total_q = sum(Discharge_CFS, na.rm = TRUE),
+            avg_q = mean(Discharge_CFS, na.rm = TRUE))
+
+stream_max <- stream_max %>% 
+  mutate(mm = max_q * 2446575580800)
+  
+  
+```
+
+## Stream Data 1 hr
+```{r}
+stream_1hr_clean <- stream_1hr %>% 
+  filter(!(Year >= "2005" & Year <= "2010")) %>% 
+  filter(!(Year >="2020" & Year <= "2023"))
+
+stream_1hr_clean <- stream_1hr_clean %>% 
+  mutate(Hour = sub("00$", "", Hour),
+         date = as.POSIXct(paste(Year, DOY, Hour), format = "%Y %j %H"),
+         month = format(date, "%m"),
+         day = format(date, "%d"),
+         year = format(date, "%Y"))
+
+view(stream_1hr_clean)
+
+```
+
+## Energy Data 
+### 1 hr data
+```{r}
+Energy_1hr_clean <- Energy_1hr %>%
+  filter(Year < 2020) %>%
+  filter(Year > 2010) %>% 
+  mutate(Hour = sub("00$", "", Hour),
+         date = as.POSIXct(paste(Year, DOY, Hour), format = "%Y %j %H"),
+         month = format(date, "%m"),
+         day = format(date, "%d"),
+         year = format(date, "%Y"))
+
+
+glimpse(Energy_1hr_clean)
+view(Energy_1hr_clean)
+str(Energy_1hr_clean)
+
+write_csv(Energy_1hr_clean, "Data/Out/Energy_1hr_clean.csv")
+
+Energy_1hr_clean <- read_csv("Data/Out/Energy_1hr_clean.csv")
+```
+
+
+#### Calculating Albedo
+```{r}
+view(Energy_1hr_clean)
+
+Energy_1hr_clean$albedo <-  Energy_1hr_clean$PyDwn_Filt_W/Energy_1hr_clean$PyUp_Filt_W
+
+
+#albedo_data <- Energy_1hr_clean %>% 
+#mutate(albedo = PyDwn_Unfilt_W/)
+```
+
+### 24 hr Data
+```{r}
+View(Energy_24hr)
+
+# View the variables
+SASP_varibale_names <- Energy_24hr %>% 
+  names()
+
+view(SASP_varibale_names)
+
+# Clean the Energy Budget Data
+
+Energy_clean <- Energy_24hr %>% 
+  filter(!(Year >= "2003" & Year <= "2010"))
+
+Energy_clean <- Energy_clean %>% 
+  filter(!(Year >= "2020" & Year <= "2022"))
+
+##  Make this a factor to make it categorical for the box plot
+Energy_clean <- Energy_clean %>% 
+  mutate(Year = factor(Year))  
+
+# Remove the non-numeric numbers
+Energy_clean <- Energy_clean %>% 
+  filter(!is.na(Pyrgeom_W) & is.finite(Pyrgeom_W))
+
+View(Energy_clean)
+
+
+```
+
+### SWE
+```{r}
+SWE_max <- SWE %>% 
+  group_by(Year = lubridate::year(Date)) %>% 
+  summarise(max_swe = max(SWE_in, na.rm = TRUE))
+
+
+
+```
+
+### Time to Peak SWE
+```{r}
+view(SWE)
+```
+
+# Analysis
+
+## Average Snowfall
+```{r}
+average_snow <- SWE %>%
+  mutate(month = lubridate::month(Date),
+         year = lubridate ::year(Date)) %>% 
+  filter(month %in% c (10,11,12,1,2,3,4)) %>% 
+           select(-month) %>%  
+  group_by(year) %>% 
+  summarise(yearly_avg = mean(Precip_in, na.rm = TRUE))
+
+
+view(average_snow)
+
+max(average_snow$yearly_avg)
+```
+
+## Join Max SWE and Discharge
+```{r}
+# Create year total for dust accumulation
+dust_mass <- dust_mass %>% 
+  mutate(Mass = as.numeric(Mass), Mass)
+
+
+year_total <- dust_mass %>% 
+  group_by(Year = year) %>% 
+  summarise(total_dust = sum(Mass))
+
+max_dates <- dust_mass %>%
+    mutate(doy = yday(date)) %>%
+    group_by(Year = year) %>%
+    mutate(cume_dust = cumsum(Mass),
+           maxday = max(cume_dust, na.rm =T)) %>%
+    filter(cume_dust == maxday,
+           !is.na(doy)) %>%
+  select(year,doy)
+    
+
+
+# Join the MAX SWE and Discharge with Dust totals
+Max_SWE_DIS <- inner_join(SWE_max, stream_max, by = "Year") %>% 
+  left_join(year_total) %>%
+  left_join(max_dates)
+
+```
+# Figures ---------------------
+
+## SWE and Q
+```{r}
+Max_SWE_DIS %>% 
+  mutate(mm = avg_q * 2446575580800) %>% 
+  mutate(cm = max_swe * 2.54) %>% 
+  ggplot(aes(x = max_swe, y = mm, color = total_dust))+
+  geom_point(size = 3)+
+  scale_color_gradient(low = "grey65", high = "blue")+
+  geom_smooth( method = "lm")+
+  labs(
+       y = " Average Runoff (mm/d)",
+       x = " Maximum SWE (cm)",
+       color = "Dust Accumulation")
+
+max_nona <- Max_SWE_DIS %>%
+  na.omit()
+
+mod <- lm(avg_q ~ max_swe + total_dust, data = max_nona)
+
+
+mod
+
+summary(mod)
+print(mod)
+
+tidy_table <- tidy(mod)
+
+kable(tidy_table)
+```
+
+### Residuals
+```{r}
+
+q_swe_resid <- max_nona %>%
+  mutate(pred_q = predict(mod, max_nona),
+         resid = avg_q - pred_q)
+
+ggplot(q_swe_resid, aes(x = doy,
+                        y = resid)) + 
+  geom_point()
+
+summary(lm(resid ~ total_dust, data = q_swe_resid))
+
+
+
+max_nona$pred_q <- predict(mod, max_nona) 
+
+
+
+Max_SWE_DIS$residuals <- mod$residuals
+
+ggplot(Max_SWE_DIS, aes(total_dust, residuals))+
+  geom_point(shape =1)+
+  geom_smooth(method = "lm",
+              color = "black")+
+  labs(x = "Total Dust Accumulation",
+       y = "Residuals")
+```
+
+## Stream Data 24 hr
+```{r}
+stream_24hr_clean %>% 
+  ggplot(aes(x = DOY, y = Discharge_CFS))+
+  geom_line()+
+  facet_wrap(stream_24hr_clean$Year)
+
+```
+
+## Stream Data 1 hr
+```{r}
+view(stream_1hr_clean)
+
+stream_1hr_clean %>% 
+  filter(Year == 2017) %>% 
+  ggplot(aes(x = date, y = Discharge_CFS))+
+  geom_line()
+```
+
+## Dust Data
+```{r}
+view(dust_2)
+str(dust_2)
+
+# Create a dataframe for the total dust accumulations per year
+dust_mass <- dust_mass %>% 
+  mutate(Mass = as.numeric(Mass), Mass)
+
+year_total <- dust_mass %>% 
+  group_by(Year = year) %>% 
+  summarise(total_dust = sum(Mass))
+
+yearly_average <- year_total %>% 
+  summarise(mean(total_dust))
+
+# Create a dateframe with the total dust accumulations per month
+month_total <- dust_mass %>% 
+  group_by(month = month(date)) %>% 
+  summarise(monthly_total = sum(Mass))
+
+year_total %>% 
+  # Set the data to each axis
+  ggplot(aes(x = Year, y = total_dust))+ 
+  # Make it a bar graph and split them by year
+  geom_bar(stat = "identity", fill = "#154360")+
+  # Add labels to each bar to help with context and adjust the position
+  geom_text(aes(label = total_dust), size = 3, vjust = -1)+
+  # Add titles
+  labs(
+       x = "Year",
+       y = "Mass (grams)")+
+  theme_minimal()+
+   # Add label for each year
+  theme(axis.text = element_text(angle = 45, colour = "black", size = 10),  
+        legend.position = "none",               # Remove the legend
+        panel.grid.major = element_blank(),     # Remove the grid lines
+        panel.grid.minor = element_blank(),
+        #plot.background = element_rect(fill = "light"),
+        plot.title = element_text(hjust = 0.5))+ # Move the title to center 
+  scale_x_continuous(breaks = year_total$Year,
+                     labels = year_total$Year)+
+  scale_y_continuous(labels = function(total_dust) format (total_dust, nsamll = 0.1))
+
+# Graph for monthly data
+month_total %>% 
+  ggplot(aes(x = month, y = monthly_total))+ 
+  geom_bar(stat = "identity", fill = "#169294")+
+  geom_text(aes(label = monthly_total), size = 3, vjust = -1)+
+  labs(
+       x = "Month",
+       y = "Mass (grams)")+
+  theme_minimal()+
+  theme(axis.text = element_text(angle = 45, colour = "black", size = 10),
+        legend.position = "none",               
+        panel.grid.major = element_blank(),     
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(hjust = 0.5))+ 
+  scale_x_continuous(breaks = month_total$month,
+                     labels = month_total$month)+
+  scale_y_continuous(labels = function(monthly_dust) format (monthly_dust, nsamll = 0.1))
+```
+
+### Closer Look at 2013
+```{r}
+dust_2013 <- dust_mass %>% 
+  filter(year == 2013) %>% 
+  mutate(DateClean = as.Date(DateClean, format = "'%m/%d/%Y'"))
+
+dust_2013 %>% 
+  mutate(Weight = as.numeric(Weigth)) %>% 
+  ggplot(aes(x = DateClean, y = Weight))+
+  geom_point()+
+  scale_y_log10()
+```
+
+
+
+## Energy Budget data 1 hr
+### Plotly
+```{r}
+Energy_1hr_clean %>%
+  filter(date > "2015-04-01" & date < "2015-04-30") %>% 
+  plot_ly(x = ~date) %>%  
+  add_trace(y = ~PyUp_Unfilt_W, type = 'scatter', mode = 'lines', 
+            line = list(color = "black"), name = "Shortwave Radiation") %>% 
+  add_trace(y = ~Sno_Height_M, type = 'scatter', mode = 'lines',
+            line = list(color = "red"), name = "Snow Depth") %>% 
+  add_trace(y = ~Sno_IR_C, type = 'scatter', mode = 'lines', 
+            yaxis = 'y2', line = list(color = 'blue'), 
+            name = "Surface Temperature") %>% 
+  layout(yaxis2 = list(overlaying = "y", side = "right"))
+
+
+my_colors <- c('red', 'blue', 'black','orange')
+
+graph_rad <- Energy_1hr_clean %>% 
+  filter(date > "2015-04-01" & date < "2015-04-30") %>% 
+  ggplot(aes(x = date)) +
+  geom_line(aes(y = PyUp_Unfilt_W, color = "PyUp_Unfilt_W"))+
+  geom_line(aes(y = PyDwn_Unfilt_W, color = "PyDwn_Unfilt_W"))+
+  scale_color_manual(values = my_colors[1:2],
+                     breaks = c("PyUp_Unfilt_W", "PyDwn_Unfilt_W"),
+                     labels = c("Downwelling Shortwave", "Upwelling Shortwave"))+
+  theme_few()+
+  labs( y= "Downwelling Shortwave Flux",
+        color = "Parameters")+
+  scale_y_continuous(
+    sec.axis = sec_axis(~., name = "Upwelling Shortwave Flux")
+  )
+
+graph_rad
+rescale_temp <- function(x) { x * 0.1}
+graph_sno <- Energy_1hr_clean %>% 
+  filter(date > "2015-04-01" & date < "2015-04-30") %>% 
+  ggplot(aes(x = date)) +
+  geom_line(aes(y = Sno_Height_M, color = "Sno_Height_M"))+
+  geom_line(aes(y = Sno_IR_C, color = "Sno_IR_C"))+
+  scale_color_manual(values = my_colors[3:4],
+                     breaks = c("Sno_Height_M", "Sno_IR_C"),
+                     labels = c("Snow Depth (m)", "Surface Temperature (C)"))+
+  theme_few()+
+  labs( y = "Snow Height (m)",
+        color = "Parameters")+
+  scale_y_continuous(sec.axis = sec_axis(~rescale_temp(.), name = "Surface Temperature (C)"))
+
+graph_sno
+  
+stacked_plots <- graph_rad / graph_sno
+
+stacked_plots
+```
+
+### April 2015
+```{r}
+Energy_1hr_clean %>% 
+  filter(month(date) == 04 & year(date) == 2015) %>% 
+  ggplot(aes(x = date))+
+  geom_line(aes(y = PyUp_Unfilt_W/100), color = "black")+
+  geom_line(aes(y = Sno_Height_M), color = "red")+
+  geom_line(aes(y = Sno_IR_C), color = "orange")+
+  scale_y_continuous(name = "Shortwave Radiation")+
+  labs(title = "April 2015")
+
+
+April_dust <- Dust_clean %>% 
+  filter(month(date) == 04 & year(date) == 2015)
+
+April_energy <- Energy_1hr_clean %>% 
+  filter(month(date)== 04 & year(date) == 2015)
+
+
+April_dust %>% 
+  ggplot(aes(x = date, y = Mass))+
+  geom_point()+
+  geom_label(aes(label = date), vjust = 1.5, hjust = 0.5, size = 3.8)+
+  theme_few()+
+  labs(
+       y = "Mass (g)",
+       x = "Date")
+```
+
+
+#### April albedo
+```{r}
+albedo_april <- Energy_1hr_clean %>% 
+  filter(month(date) == 04 & year(date) == 2015) %>% 
+  select(date, albedo)
+
+str(albedo_april)
+
+albedo_april_clean <- dplyr::filter(albedo_april, albedo > 0 & albedo < 1)
+
+albedo_plot <- albedo_april_clean %>% 
+  filter(hour(date) > 13 & hour(date) < 24) %>%
+  ggplot(aes(x = date, y = albedo))+
+  geom_point() +
+  geom_vline(xintercept = mdy_hms('04/01/2015 02:00:00'))+
+  geom_vline(xintercept = mdy_hms('04/08/2015 02:00:00'))+
+  geom_vline(xintercept = mdy_hms('04/14/2015 02:00:00'))
+
+albedo_plot 
+
+
+plotly::ggplotly(albedo_plot)
+
+april_D2 <- albedo_april_clean %>% 
+  filter(day(date) >= 6 & day(date) <= 13)
+```
+
+## Visualize Energy budget data
+```{r, fig.cap= " Figure 1. Downdwelling long wave radiation measured at SASP for each year with dust on snow records. "}
+
+Energy_clean %>% 
+  ggplot(aes(x = Year, y = Pyrgeom_W, fill = Year))+
+  geom_boxplot()+
+  # Color Palette
+  scale_fill_brewer(palette = "Spectral")+
+  # Placing points on top of the box plot to see distribution
+  #geom_jitter(size = 0.3)+
+  # Titles
+  labs(title ="Trends of Downdwelling Longwave Radiation",
+       x = "Year",
+       y = "Downward Longwave Raditiation (W/m2)")+
+  # Break the graphs up into separate years
+  facet_grid(~Year, scales = "free_x")+
+  theme(
+    text = element_text(size = 12),           # X axis labels
+    legend.position = "none",                 # Remove the legend
+    plot.title = element_text(hjust = 0.5)    # Move the title to the middle
+  )
+```
+
+
+
+# Combining Data Sets --------
+```{r}
+view(Energy_1hr_clean)
+view(dust_mass)
+
+dust_bef_aft <- dust_mass %>% 
+  mutate(DateClean = as.Date(DateClean, format = "%m/%d/%Y")) %>% 
+  mutate(before = DateClean - 7)
+```
+
+
